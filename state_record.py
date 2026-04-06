@@ -14,3 +14,4 @@ class StateRecord:
     efficiency: float
     power: float
     fuel_consumed: float
+
