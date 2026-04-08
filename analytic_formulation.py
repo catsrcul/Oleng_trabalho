@@ -102,15 +102,36 @@ class OlengEquations:
     # --- Core Mathematical Formulations ---
 
     """
-    Defined equatins: 10, 11, 12
+    Defined equations: 6,7,9 (efficiency), 10, 11, 12
     Total number of equations: 11
     """
 
-    def calculate_ni(self, v, xi_ax, xi_n):
-        """Equation (11) - Rotational speed calculation"""
-        v_kmh = v.to('km/h').magnitude
-        ni_mag = (9.55 * v_kmh * xi_ax * xi_n) / self.p['rd'].to('m').magnitude
-        return Q_(ni_mag, 'rpm')
+    def calculate_total_efficiency(self, v, a, xi_ax, xi_n):
+        """Equations (6-9) - instantaneous System efficiency lookup"""
+        if v < Q_(0.1, 'km/h'):
+            return 0.0, Q_(0.0, 'kW')
+
+        ni = self.calculate_ni(v, xi_ax, xi_n)
+        Pe = self.calculate_Pe(ni)
+        Pi = self.calculate_Pi(v, a)
+
+        if Pe <= Q_(0, 'kW') or Pi <= Q_(0, 'kW'):
+            return 0.0, Pi
+
+        # Non-dimensional ratios for the empirical polynomial
+        r_P = (Pi / Pe).to('dimensionless').magnitude
+        r_n = (ni / self.p['nP']).to('dimensionless').magnitude
+
+        # Eq 7 - Correction factor for load (mu_P)
+        mu_P = 0.5968 - 0.1666 * r_P + 2.4968 * (r_P ** 2) - 2.1128 * (r_P ** 3)
+
+        # Eq 9 - Correction factor for speed (mu_n)
+        mu_n = 0.7107 + 0.9963 * r_n - 1.0582 * (r_n ** 2) + 0.3124 * (r_n ** 3)
+
+        # Eq 6 - Final combined efficiency
+        # where eta_o is the peak efficiency of the engine
+        eta = self.p['eta_o'] * mu_P * mu_n
+        return max(float(eta), 0.0), Pi
 
     def calculate_Pe(self, ni):
         """Equation (10) - Available engine power"""
@@ -119,6 +140,12 @@ class OlengEquations:
                  self.p['b'] * ratio ** 2 -
                  self.p['c'] * ratio ** 3)
         return self.p['PP'].to('kW') * terms
+
+    def calculate_ni(self, v, xi_ax, xi_n):
+        """Equation (11) - Rotational speed calculation"""
+        v_kmh = v.to('km/h').magnitude
+        ni_mag = (9.55 * v_kmh * xi_ax * xi_n) / self.p['rd'].to('m').magnitude
+        return Q_(ni_mag, 'rpm')
 
     def calculate_Pi(self, v, a):
         """Equation (12) - Required instantaneous power"""
@@ -137,28 +164,4 @@ class OlengEquations:
         total_power = (1 / self.p['eta_T']) * (rolling_res + aero_res + inertial_res)
         return total_power.to('kW')
 
-    def calculate_total_efficiency(self, v, a, xi_ax, xi_n):
-        """Equations (12-14) - System efficiency lookup"""
-        if v < Q_(0.1, 'km/h'):
-            return 0.0, Q_(0.0, 'kW')
 
-        ni = self.calculate_ni(v, xi_ax, xi_n)
-        Pe = self.calculate_Pe(ni)
-        Pi = self.calculate_Pi(v, a)
-
-        if Pe <= Q_(0, 'kW') or Pi <= Q_(0, 'kW'):
-            return 0.0, Pi
-
-        # Non-dimensional ratios for the empirical polynomial
-        r_P = (Pi / Pe).to('dimensionless').magnitude
-        r_n = (ni / self.p['nP']).to('dimensionless').magnitude
-
-        # Eq 12 - Correction factor for load (mu_P)
-        mu_P = 0.5968 - 0.1666 * r_P + 2.4968 * (r_P ** 2) - 2.1128 * (r_P ** 3)
-
-        # Eq 13 - Correction factor for speed (mu_n)
-        mu_n = 0.7107 + 0.9963 * r_n - 1.0582 * (r_n ** 2) + 0.3124 * (r_n ** 3)
-
-        # Eq 14 - Final combined efficiency
-        eta = self.p['eta_o'] * mu_P * mu_n
-        return max(float(eta), 0.0), Pi
