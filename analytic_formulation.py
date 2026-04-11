@@ -154,7 +154,7 @@ class OlengEquations:
 
         # Resistance forces * velocity
         # Here the velocities aren't divided by 3.6 because "pint" already takes care of unit conversion.
-        rolling_res = self.p['mv'] * self.p['g'] * self.p['fr'] * v_ms
+        rolling_res = self.p['mv'] * self.p['g'] * float(self.p['fr']) * v_ms
         aero_res = 0.5 * self.p['rho_a'] * self.p['CD'] * self.p['Af'] * (v_ms ** 3)
 
         # The inertial part in the paper is wrong, we need to convert the [N] we end up with to th kW we want by
@@ -164,4 +164,50 @@ class OlengEquations:
         total_power = (1 / self.p['eta_T']) * (rolling_res + aero_res + inertial_res)
         return total_power.to('kW')
 
+if __name__ == "__main__":
+    from pint import UnitRegistry
+    ureg = UnitRegistry()
+    Q_ = ureg.Quantity
 
+    # --- Vehicle Parameters (typical passenger car) ---
+    params = {
+        'rd':      Q_(0.316, 'm'),           # Wheel radius
+        'nP':      Q_(4000, 'rpm'),           # Rated engine speed
+        'a':       1.2,                       # Engine polynomial coeff a
+        'b':       1.0,                       # Engine polynomial coeff b
+        'c':       0.5,                       # Engine polynomial coeff c
+        'PP':      Q_(100.0, 'kW'),           # Peak engine power
+        'mv':      Q_(1500.0, 'kg'),          # Vehicle mass
+        'g':       Q_(9.81, 'm/s**2'),
+        'fr':      Q_(0.015, 'dimensionless'),# Rolling resistance
+        'rho_a':   Q_(1.225, 'kg/m**3'),     # Air density
+        'CD':      Q_(0.30, 'dimensionless'), # Drag coefficient
+        'Af':      Q_(2.2, 'm**2'),           # Frontal area
+        'gamma_m': Q_(1.05, 'dimensionless'),# Rotational inertia factor
+        'eta_T':   Q_(0.92, 'dimensionless'),# Drivetrain efficiency
+        'eta_o':   Q_(0.38, 'dimensionless'),# Peak engine efficiency
+        'HL':      Q_(44e6, 'J/kg'),         # Lower heating value (gasoline)
+    }
+
+    # Gear/axle ratios (fix these to a single gear for now)
+    xi_ax = 3.9   # Axle ratio
+    xi_n  = 1.0   # Gear ratio (top gear)
+
+    # --- Route: 100 km at constant 90 km/h ---
+    delta_s   = Q_(500.0, 'm')          # Distance step
+    total_dist = Q_(100_000.0, 'm')     # 100 km
+    n_steps   = int(total_dist / delta_s)
+    v_cruise  = Q_(90.0, 'km/h').to('m/s')
+
+    model = OlengEquations(params, initial_velocity=v_cruise)
+
+    for _ in range(n_steps):
+        model.step_distance(delta_s, v_cruise, xi_ax, xi_n)
+
+    # --- Results ---
+    total_fuel = sum(r.fuel_consumed.to('kg').magnitude for r in model.history)
+    total_time = model.history[-1].time_index.to('s').magnitude / 3600  # hours
+
+    print(f"Total fuel:  {total_fuel:.3f} kg")
+    print(f"Total time:  {total_time:.2f} h")
+    print(f"Consumption: {total_fuel / (total_dist.to('km').magnitude) * 100:.2f} kg/100km")
