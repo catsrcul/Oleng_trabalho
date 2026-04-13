@@ -1,7 +1,7 @@
 #### Super summary:
 
-Project optimize fuel use. Find best speed profile.
-Model mix physics with engine maps. Predict energy cost.
-Input vehicle constants (mass, aero, engine curves). Define car.
-Output fuel used over distance. Evaluate driving strategy.
-Discretization distance steps. Match road segments.
+This project optimizes fuel use by finding the best speed profile.
+The model combines physics with engine maps to predict energy cost.
+Vehicle constants (mass, aerodynamics, and engine curves) define the car.
+The output is fuel used over a given distance to evaluate a driving strategy.
+The discretization uses distance steps to match road segments.
