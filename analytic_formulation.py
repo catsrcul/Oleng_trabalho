@@ -102,8 +102,7 @@ class OlengEquations:
     # --- Core Mathematical Formulations ---
 
     """
-    Defined equations: 6,7,9 (efficiency), 10, 11, 12
-    Total number of equations: 11
+    Implemented equations: 6, 7, 9 (efficiency), 10, 11, 12
     """
 
     def calculate_total_efficiency(self, v, a, xi_ax, xi_n):
