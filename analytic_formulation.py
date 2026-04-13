@@ -1,123 +1,211 @@
 import numpy as np
-from state_record import StateRecord
+from dataclasses import dataclass
+from pint import UnitRegistry
 
-from dataclasses import asdict
+# Initialize unit registry for physical consistency
+ureg = UnitRegistry()
+Q_ = ureg.Quantity
 
-## first draft with a linear formulation
+
+@dataclass
+class StateRecord:
+    """Stores the state of the vehicle at a specific distance marker."""
+    distance: ureg.Quantity  # Fixed step markers (e.g., meters)
+    velocity: ureg.Quantity  # Velocity at this marker (m/s)
+    delta_t: ureg.Quantity  # Time taken to reach this marker from previous (s)
+    time_index: ureg.Quantity  # Cumulative time (s)
+    acceleration: ureg.Quantity  # Constant acceleration in this segment (m/s^2)
+    efficiency: float  # System efficiency in this segment [0-1]
+    power: ureg.Quantity  # Average power in this segment (kW)
+    fuel_consumed: ureg.Quantity  # Fuel consumed in this segment (kg or L)
+
 
 class OlengEquations:
     def __init__(self, params, initial_velocity=0.0):
         """
-        params: dictionary with constants (m_v, g, f_r, rho_a, Cd, Af, etc.)
+        Initializes the vehicle model with parameters and starting state.
+
+        params: dictionary containing Quantities for:
+            rd (m), nP (rpm), a, b, c (dim), PP (kW), mv (kg), g (m/s^2),
+            fr (dim), rho_a (kg/m^3), CD (dim), Af (m^2), gamma_m (dim),
+            eta_T (dim), eta_o (dim), HL (J/kg or J/L)
         """
         self.p = params
         self.history = []
 
-        # Initial State at t=0
+        # Ensure initial velocity is a Quantity
+        v0 = initial_velocity if isinstance(initial_velocity, ureg.Quantity) else Q_(initial_velocity, 'm/s')
+
+        # Initial State (Marker 0)
         self.history.append(StateRecord(
-            time_index=Q_(0.0, 's'),
-            delta_t=Q_(0.0, 's'),
-            acceleration=Q_(0.0, 'm/s**2'),
-            velocity=v0,
             distance=Q_(0.0, 'm'),
+            velocity=v0,
+            delta_t=Q_(0.0, 's'),
+            time_index=Q_(0.0, 's'),
+            acceleration=Q_(0.0, 'm/s**2'),
             efficiency=0.0,
             power=Q_(0.0, 'kW'),
             fuel_consumed=Q_(0.0, 'kg')
         ))
 
-
-
-    def step(self, delta_t, a_i, xi_ax, xi_n):
+    def step_distance(self, delta_s, v_target, xi_ax, xi_n):
         """
-        Calculates and stores the current moment's data based on the equations.
+        Calculates the transition to the next distance marker.
+
+        delta_s: Fixed distance step (Quantity, e.g., 100m)
+        v_target: Target velocity at the end of the distance step (Quantity, e.g., 20m/s)
+        xi_ax, xi_n: Transmission ratios (floats)
         """
         prev = self.history[-1]
+        v_start = prev.velocity
 
-        # 1. Update Kinematics
-        v_i = prev.velocity + (a_i * delta_t)
-        # Ensure velocity doesn't go below zero
-        if v_i < 0: v_i = 0
+        # 1. Kinematics for a fixed distance step
+        # v_avg is used for power calculations and time estimation
+        v_avg = (v_start + v_target) / 2
 
-        d_i = prev.distance + (v_i * delta_t) + (0.5 * a_i * (delta_t ** 2))
+        # Guard against zero velocity to avoid infinite time
+        v_avg_safe = max(v_avg, Q_(1e-3, 'm/s'))
+        dt = delta_s / v_avg_safe
 
-        # 2. Run your mathematical formulations
-        # Note: Efficiency formulas often expect km/h
-        v_kmh = v_i * 3.6
-        eta, Pi = self.calculate_total_efficiency(v_kmh, a_i, xi_ax, xi_n)
+        # Constant acceleration derived from distance and velocities: a = (v_f^2 - v_i^2) / (2 * ds)
+        # Note: We use .to('m/s') to ensure units cancel out correctly for the magnitude
+        accel = (v_target ** 2 - v_start ** 2) / (2 * delta_s)
 
-        # 3. Calculate fuel consumption for this instant
-        # We pass your required parameters to your specific function
-        # Here we use Pi * delta_t as Energy 1 and 0 as Energy 2 (placeholder for braking/others)
-        instant_fuel = self.fuel_consumption(Pi * delta_t, 0, self.p['HL'] * eta if eta > 0 else 1)
-        if eta <= 0 or Pi <= 0: instant_fuel = 0
+        # 2. Power and Efficiency (Equations 9-14)
+        # We evaluate the vehicle state at the average velocity of the segment
+        eta, Pi = self.calculate_total_efficiency(v_avg, accel, xi_ax, xi_n)
 
-        # 4. Store the return values
+        # 3. Energy and Consumption
+        # Energy = Power * Time
+        energy = (Pi * dt).to('joule')
+
+        if Pi <= Q_(0, 'kW') or eta <= 0:
+            instant_fuel = Q_(0.0, 'kg')
+        else:
+            # Fuel = Energy / (Lower Heating Value * Efficiency)
+            instant_fuel = energy / (self.p['HL'] * eta)
+
         record = StateRecord(
-            time_index=prev.time_index + delta_t,
-            delta_t=delta_t,
-            acceleration=a_i,
-            velocity=v_i,
-            distance=d_i,
+            distance=prev.distance + delta_s,
+            velocity=v_target,
+            delta_t=dt,
+            time_index=prev.time_index + dt,
+            acceleration=accel,
             efficiency=eta,
-            power=Pi,
+            power=Pi.to('kW'),
             fuel_consumed=instant_fuel
         )
 
         self.history.append(record)
         return record
 
-    def calculate_ni(self, v, xi_ax, xi_n):
-        # equation (9) -
-        return (9.55 * v * xi_ax * xi_n) / self.p['rd']
+    # --- Core Mathematical Formulations ---
 
-    def calculate_Pe(self, ni):
-        # equation (10)
-        ratio = ni / self.p['nP']
-        termos = (self.p['a'] * ratio +
-                  self.p['b'] * ratio ** 2 -
-                  self.p['c'] * ratio ** 3)
-        return self.p['PP'] * termos
-
-    def calculate_Pi(self, v, a):
-        # Equação (11) - Potência instantânea necessária
-        v_ms = v / 3.6  # Conversão de km/h para m/s se necessário
-
-        termo_rolamento = self.p['mv'] * self.p['g'] * self.p['fr'] * v_ms
-        termo_aerodinamico = 0.5 * self.p['rho_a'] * self.p['CD'] * self.p['Af'] * (v_ms ** 3)
-        termo_inercial = self.p['mv'] * self.p['gamma_m'] * a * v_ms
-
-        return (1 / self.p['eta_T']) * (termo_rolamento + termo_aerodinamico + termo_inercial)
+    """
+    Defined equations: 6,7,9 (efficiency), 10, 11, 12
+    Total number of equations: 11
+    """
 
     def calculate_total_efficiency(self, v, a, xi_ax, xi_n):
+        """Equations (6-9) - instantaneous System efficiency lookup"""
+        if v < Q_(0.1, 'km/h'):
+            return 0.0, Q_(0.0, 'kW')
+
         ni = self.calculate_ni(v, xi_ax, xi_n)
         Pe = self.calculate_Pe(ni)
         Pi = self.calculate_Pi(v, a)
 
-        # Razões para os polinómios
-        r_P = Pi / Pe
-        r_n = ni / self.p['nP']
+        if Pe <= Q_(0, 'kW') or Pi <= Q_(0, 'kW'):
+            return 0.0, Pi
 
-        # Equação (12) - mu_P
+        # Non-dimensional ratios for the empirical polynomial
+        r_P = (Pi / Pe).to('dimensionless').magnitude
+        r_n = (ni / self.p['nP']).to('dimensionless').magnitude
+
+        # Eq 7 - Correction factor for load (mu_P)
         mu_P = 0.5968 - 0.1666 * r_P + 2.4968 * (r_P ** 2) - 2.1128 * (r_P ** 3)
 
-        # Equação (13) - mu_n
+        # Eq 9 - Correction factor for speed (mu_n)
         mu_n = 0.7107 + 0.9963 * r_n - 1.0582 * (r_n ** 2) + 0.3124 * (r_n ** 3)
 
-        # Equação (14) - Eficiência final
+        # Eq 6 - Final combined efficiency
+        # where eta_o is the peak efficiency of the engine
         eta = self.p['eta_o'] * mu_P * mu_n
-        return eta, Pi
+        return max(float(eta), 0.0), Pi
 
-    def equation_E1(self):
-        # power consumption going to overcome resistance
-        equation_E1 = (1 / eta_t) * (1 / eta_i) * (m_v * g * f_r * (v_i / 3.6))
-        return equation_E1
+    def calculate_Pe(self, ni):
+        """Equation (10) - Available engine power"""
+        ratio = (ni / self.p['nP']).to('dimensionless').magnitude
+        terms = (self.p['a'] * ratio +
+                 self.p['b'] * ratio ** 2 -
+                 self.p['c'] * ratio ** 3)
+        return self.p['PP'].to('kW') * terms
 
-    def equation_E2(self):
-        # power consumption to change kinetic energy
-        equation_E2 = ((m_v * lambda_m) / 2) * (a_i / eta_i) * delta_t
-        return equation_E2
+    def calculate_ni(self, v, xi_ax, xi_n):
+        """Equation (11) - Rotational speed calculation"""
+        v_kmh = v.to('km/h').magnitude
+        ni_mag = (9.55 * v_kmh * xi_ax * xi_n) / self.p['rd'].to('m').magnitude
+        return Q_(ni_mag, 'rpm')
 
+    def calculate_Pi(self, v, a):
+        """Equation (12) - Required instantaneous power"""
+        v_ms = v.to('m/s')
+        a_ms2 = a.to('m/s**2')
 
-    def fuel_consumption(self, E_1, E_2, H_L):
-        return (E_1 + E_2) / H_L
+        # Resistance forces * velocity
+        # Here the velocities aren't divided by 3.6 because "pint" already takes care of unit conversion.
+        rolling_res = self.p['mv'] * self.p['g'] * float(self.p['fr']) * v_ms
+        aero_res = 0.5 * self.p['rho_a'] * self.p['CD'] * self.p['Af'] * (v_ms ** 3)
 
+        # The inertial part in the paper is wrong, we need to convert the [N] we end up with to th kW we want by
+        # multiplying by the velocity.
+        inertial_res = self.p['mv'] * self.p['gamma_m'] * a_ms2 * v_ms
+
+        total_power = (1 / self.p['eta_T']) * (rolling_res + aero_res + inertial_res)
+        return total_power.to('kW')
+
+if __name__ == "__main__":
+    # Reuse the module-level unit registry/quantity constructor.
+
+    # --- Vehicle Parameters (typical passenger car) ---
+    params = {
+        'rd':      Q_(0.316, 'm'),           # Wheel radius
+        'nP':      Q_(4000, 'rpm'),           # Rated engine speed
+        'a':       1.2,                       # Engine polynomial coeff a
+        'b':       1.0,                       # Engine polynomial coeff b
+        'c':       0.5,                       # Engine polynomial coeff c
+        'PP':      Q_(100.0, 'kW'),           # Peak engine power
+        'mv':      Q_(1500.0, 'kg'),          # Vehicle mass
+        'g':       Q_(9.81, 'm/s**2'),
+        'fr':      Q_(0.015, 'dimensionless'),# Rolling resistance
+        'rho_a':   Q_(1.225, 'kg/m**3'),     # Air density
+        'CD':      Q_(0.30, 'dimensionless'), # Drag coefficient
+        'Af':      Q_(2.2, 'm**2'),           # Frontal area
+        'gamma_m': Q_(1.05, 'dimensionless'),# Rotational inertia factor
+        'eta_T':   Q_(0.92, 'dimensionless'),# Drivetrain efficiency
+        'eta_o':   Q_(0.38, 'dimensionless'),# Peak engine efficiency
+        'HL':      Q_(44e6, 'J/kg'),         # Lower heating value (gasoline)
+    }
+
+    # Gear/axle ratios (fix these to a single gear for now)
+    xi_ax = 3.9   # Axle ratio
+    xi_n  = 1.0   # Gear ratio (top gear)
+
+    # --- Route: 100 km at constant 90 km/h ---
+    delta_s   = Q_(500.0, 'm')          # Distance step
+    total_dist = Q_(100_000.0, 'm')     # 100 km
+    n_steps   = int(total_dist / delta_s)
+    v_cruise  = Q_(90.0, 'km/h').to('m/s')
+
+    model = OlengEquations(params, initial_velocity=v_cruise)
+
+    for _ in range(n_steps):
+        model.step_distance(delta_s, v_cruise, xi_ax, xi_n)
+
+    # --- Results ---
+    total_fuel = sum(r.fuel_consumed.to('kg').magnitude for r in model.history)
+    total_time = model.history[-1].time_index.to('s').magnitude / 3600  # hours
+
+    print(f"Total fuel:  {total_fuel:.3f} kg")
+    print(f"Total time:  {total_time:.2f} h")
+    print(f"Consumption: {total_fuel / (total_dist.to('km').magnitude) * 100:.2f} kg/100km")
