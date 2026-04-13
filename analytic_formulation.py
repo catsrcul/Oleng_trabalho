@@ -156,8 +156,7 @@ class OlengEquations:
         rolling_res = self.p['mv'] * self.p['g'] * float(self.p['fr']) * v_ms
         aero_res = 0.5 * self.p['rho_a'] * self.p['CD'] * self.p['Af'] * (v_ms ** 3)
 
-        # The inertial part in the paper is wrong, we need to convert the [N] we end up with to th kW we want by
-        # multiplying by the velocity.
+        # The inertial term in the paper appears to yield force [N]; multiply by velocity to convert it to power.
         inertial_res = self.p['mv'] * self.p['gamma_m'] * a_ms2 * v_ms
 
         total_power = (1 / self.p['eta_T']) * (rolling_res + aero_res + inertial_res)
