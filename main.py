@@ -40,8 +40,10 @@ for i in range(n_steps):
 # --- Output ---
 total_fuel = sum(r.fuel_consumed.to('kg').magnitude for r in model.history)
 total_time = model.history[-1].time_index.to('s').magnitude / 3600
+distance_km = total_dist.to('km').magnitude
+consumption_per_100km = total_fuel / distance_km * 100
 
 print(f"Steps:       {n_steps}")
 print(f"Total fuel:  {total_fuel:.3f} kg")
 print(f"Total time:  {total_time:.3f} h")
-print(f"Consumption: {total_fuel / 100:.3f} kg/100km")
+print(f"Consumption: {consumption_per_100km:.3f} kg/100km")
