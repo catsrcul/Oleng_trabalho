@@ -17,8 +17,16 @@ class StateRecord:
     time_index: ureg.Quantity  # Cumulative time (s)
     acceleration: ureg.Quantity  # Constant acceleration in this segment (m/s^2)
     efficiency: float  # System efficiency in this segment [0-1]
-    power: ureg.Quantity  # Average power in this segment (kW)
+    power: ureg.Quantity  # Required power Pi in this segment (kW), evaluated at v_avg
     fuel_consumed: ureg.Quantity  # Fuel consumed in this segment (kg or L)
+    # Intermediates evaluated at v_avg (average segment velocity) for consistent logging
+    v_avg: ureg.Quantity = None  # Average velocity used for all power/efficiency calculations
+    engine_rpm: ureg.Quantity = None  # Engine speed at v_avg
+    Pe: ureg.Quantity = None  # Available engine power at v_avg
+    r_P: float = 0.0  # Power ratio Pi/Pe at v_avg
+    r_n: float = 0.0  # Speed ratio ni/nP at v_avg
+    mu_P: float = 0.0  # Load correction factor at v_avg
+    mu_n: float = 0.0  # Speed correction factor at v_avg
 
 
 class OlengEquations:
@@ -74,7 +82,7 @@ class OlengEquations:
 
         # 2. Power and Efficiency (Equations 9-14)
         # We evaluate the vehicle state at the average velocity of the segment
-        eta, Pi = self.calculate_total_efficiency(v_avg, accel, xi_ax, xi_n)
+        eta, Pi, ni, Pe, r_P, r_n, mu_P, mu_n = self.calculate_total_efficiency(v_avg, accel, xi_ax, xi_n)
 
         # 3. Energy and Consumption
         # Energy = Power * Time
@@ -94,7 +102,14 @@ class OlengEquations:
             acceleration=accel,
             efficiency=eta,
             power=Pi.to('kW'),
-            fuel_consumed=instant_fuel
+            fuel_consumed=instant_fuel,
+            v_avg=v_avg,
+            engine_rpm=ni,
+            Pe=Pe,
+            r_P=r_P,
+            r_n=r_n,
+            mu_P=mu_P,
+            mu_n=mu_n,
         )
 
         self.history.append(record)
@@ -107,20 +122,25 @@ class OlengEquations:
     """
 
     def calculate_total_efficiency(self, v, a, xi_ax, xi_n):
-        """Equations (6-9) - instantaneous System efficiency lookup"""
+        """Equations (6-9) - instantaneous System efficiency lookup.
+
+        Returns (eta, Pi, ni, Pe, r_P, r_n, mu_P, mu_n) all evaluated at velocity v.
+        """
+        zero_kW = Q_(0.0, 'kW')
+        zero_rpm = Q_(0.0, 'rpm')
         if v < Q_(0.1, 'km/h'):
-            return 0.0, Q_(0.0, 'kW')
+            return 0.0, zero_kW, zero_rpm, zero_kW, 0.0, 0.0, 0.0, 0.0
 
         ni = self.calculate_ni(v, xi_ax, xi_n)
         Pe = self.calculate_Pe(ni)
         Pi = self.calculate_Pi(v, a)
+        r_n = float((ni / self.p['nP']).to('dimensionless').magnitude)
 
         if Pe <= Q_(0, 'kW') or Pi <= Q_(0, 'kW'):
-            return 0.0, Pi
+            return 0.0, Pi, ni, Pe, 0.0, r_n, 0.0, 0.0
 
         # Non-dimensional ratios for the empirical polynomial
-        r_P = (Pi / Pe).to('dimensionless').magnitude
-        r_n = (ni / self.p['nP']).to('dimensionless').magnitude
+        r_P = float((Pi / Pe).to('dimensionless').magnitude)
 
         # Eq 7 - Correction factor for load (mu_P)
         mu_P = 0.5968 - 0.1666 * r_P + 2.4968 * (r_P ** 2) - 2.1128 * (r_P ** 3)
@@ -131,7 +151,7 @@ class OlengEquations:
         # Eq 6 - Final combined efficiency
         # where eta_o is the peak efficiency of the engine
         eta = self.p['eta_o'] * mu_P * mu_n
-        return max(float(eta), 0.0), Pi
+        return max(float(eta), 0.0), Pi, ni, Pe, r_P, r_n, float(mu_P), float(mu_n)
 
     def calculate_Pe(self, ni):
         """Equation (10) - Available engine power"""
@@ -194,36 +214,28 @@ class OlengEquations:
         # --- Build DataFrame ---
         rows = []
         for r in self.history:
-            v = r.velocity.to('m/s').magnitude
-            a = r.acceleration.to('m/s**2').magnitude
-            xi_ax_local = xi_ax
-            xi_n_local = xi_n
-
-            # Recompute intermediate quantities for logging
-            ni = self.calculate_ni(r.velocity, xi_ax_local, xi_n_local)
-            Pe = self.calculate_Pe(ni)
-            Pi = self.calculate_Pi(r.velocity, r.acceleration)
-            r_P = float((Pi / Pe).to('dimensionless').magnitude) if Pe.magnitude > 0 else 0.0
-            r_n = float((ni / self.p['nP']).to('dimensionless').magnitude)
-            mu_P = 0.5968 - 0.1666 * r_P + 2.4968 * r_P ** 2 - 2.1128 * r_P ** 3
-            mu_n = 0.7107 + 0.9963 * r_n - 1.0582 * r_n ** 2 + 0.3124 * r_n ** 3
-
-            energy_j = (Pi * r.delta_t).to('joule').magnitude if Pi.magnitude > 0 else 0.0
+            # Use stored intermediates — all evaluated at v_avg — for consistent logging
+            v_avg_ms = r.v_avg.to('m/s').magnitude if r.v_avg is not None else 0.0
+            ni_rpm = r.engine_rpm.to('rpm').magnitude if r.engine_rpm is not None else 0.0
+            Pe_kW = r.Pe.to('kW').magnitude if r.Pe is not None else 0.0
+            Pi_kW = r.power.to('kW').magnitude
+            energy_j = (r.power * r.delta_t).to('joule').magnitude if r.power.magnitude > 0 else 0.0
 
             rows.append({
                 'distance_m': r.distance.to('m').magnitude,
                 'time_s': r.time_index.to('s').magnitude,
                 'delta_t_s': r.delta_t.to('s').magnitude,
-                'velocity_ms': v,
+                'velocity_ms': r.velocity.to('m/s').magnitude,
                 'velocity_kmh': r.velocity.to('km/h').magnitude,
-                'acceleration_ms2': a,
-                'engine_rpm': ni.to('rpm').magnitude,
-                'Pe_kW': Pe.to('kW').magnitude,
-                'Pi_kW': Pi.to('kW').magnitude,
-                'r_P': r_P,
-                'r_n': r_n,
-                'mu_P': mu_P,
-                'mu_n': mu_n,
+                'v_avg_ms': v_avg_ms,
+                'acceleration_ms2': r.acceleration.to('m/s**2').magnitude,
+                'engine_rpm': ni_rpm,
+                'Pe_kW': Pe_kW,
+                'Pi_kW': Pi_kW,
+                'r_P': r.r_P,
+                'r_n': r.r_n,
+                'mu_P': r.mu_P,
+                'mu_n': r.mu_n,
                 'efficiency': r.efficiency,
                 'energy_J': energy_j,
                 'fuel_kg': r.fuel_consumed.to('kg').magnitude,
