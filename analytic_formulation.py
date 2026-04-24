@@ -241,9 +241,7 @@ class OlengEquations:
         return data_frame
 
 if __name__ == "__main__":
-    from pint import UnitRegistry
-    ureg = UnitRegistry()
-    Q_ = ureg.Quantity
+    # Reuse the module-level unit registry/quantity constructor.
 
     # --- Vehicle Parameters (typical passenger car) ---
     params = {
