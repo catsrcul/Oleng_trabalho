@@ -1,6 +1,6 @@
 from analytic_formulation import OlengEquations
-from pint import UnitRegistry
 from analytic_formulation import ureg, Q_
+import numpy as np
 
 # --- Params ---
 params = {
@@ -32,16 +32,14 @@ n_steps    = int(total_dist / delta_s)
 v_cruise   = Q_(90.0, 'km/h').to('m/s')
 
 # --- Run ---
-model = OlengEquations(params, initial_velocity=v_cruise)
 
-for i in range(n_steps):
-    model.step_distance(delta_s, v_cruise, xi_ax, xi_n)
+model = OlengEquations(params, initial_velocity=Q_(90.0, 'km/h').to('m/s'))
 
-# --- Output ---
-total_fuel = sum(r.fuel_consumed.to('kg').magnitude for r in model.history)
-total_time = model.history[-1].time_index.to('s').magnitude / 3600
+# Constant speed → acceleration = 0 everywhere
+n_steps     = 200
+delta_s     = Q_(500.0, 'm')
+accelerations = np.zeros(n_steps)
 
-print(f"Steps:       {n_steps}")
-print(f"Total fuel:  {total_fuel:.3f} kg")
-print(f"Total time:  {total_time:.3f} h")
-print(f"Consumption: {total_fuel / 100:.3f} kg/100km")
+df = model.run(accelerations, delta_s, xi_ax=3.9, xi_n=1.0, output_path="results.csv")
+
+print(df[['distance_m', 'velocity_kmh', 'Pi_kW', 'efficiency', 'fuel_cumulative_kg']].tail())

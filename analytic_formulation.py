@@ -1,6 +1,7 @@
-import numpy as np
 from dataclasses import dataclass
 from pint import UnitRegistry
+import pandas as pd
+import numpy as np
 
 # Initialize unit registry for physical consistency
 ureg = UnitRegistry()
@@ -156,11 +157,88 @@ class OlengEquations:
         rolling_res = self.p['mv'] * self.p['g'] * float(self.p['fr']) * v_ms
         aero_res = 0.5 * self.p['rho_a'] * self.p['CD'] * self.p['Af'] * (v_ms ** 3)
 
-        # The inertial term in the paper appears to yield force [N]; multiply by velocity to convert it to power.
+        # The inertial term in the paper yields force [N]; multiply by velocity to convert it to power.
         inertial_res = self.p['mv'] * self.p['gamma_m'] * a_ms2 * v_ms
 
         total_power = (1 / self.p['eta_T']) * (rolling_res + aero_res + inertial_res)
         return total_power.to('kW')
+
+
+
+    def run(self, accelerations, delta_s, xi_ax, xi_n, output_path=None):
+        """
+        Run full simulation from acceleration array.
+
+        accelerations: list/array of floats (m/s^2), one per distance step
+        delta_s: Quantity (m), fixed step size
+        xi_ax, xi_n: floats, gear/axle ratios
+        output_path: str, where to save CSV
+
+        Returns: pandas DataFrame with all computed quantities
+        """
+        # Reset history to initial state only
+        self.history = [self.history[0]]
+
+        for a_val in accelerations:
+            prev = self.history[-1]
+            v_start = prev.velocity.to('m/s').magnitude
+
+            # Derive v_target from kinematics: v_f = sqrt(v_i^2 + 2*a*ds)
+            ds = delta_s.to('m').magnitude
+            v_f_sq = v_start ** 2 + 2 * a_val * ds
+            v_f_sq = max(v_f_sq, 0.0)  # guard negative under sqrt
+            v_target = Q_(np.sqrt(v_f_sq), 'm/s')
+
+            self.step_distance(delta_s, v_target, xi_ax, xi_n)
+
+        # --- Build DataFrame ---
+        rows = []
+        for r in self.history:
+            v = r.velocity.to('m/s').magnitude
+            a = r.acceleration.to('m/s**2').magnitude
+            xi_ax_local = xi_ax
+            xi_n_local = xi_n
+
+            # Recompute intermediate quantities for logging
+            ni = self.calculate_ni(r.velocity, xi_ax_local, xi_n_local)
+            Pe = self.calculate_Pe(ni)
+            Pi = self.calculate_Pi(r.velocity, r.acceleration)
+            r_P = float((Pi / Pe).to('dimensionless').magnitude) if Pe.magnitude > 0 else 0.0
+            r_n = float((ni / self.p['nP']).to('dimensionless').magnitude)
+            mu_P = 0.5968 - 0.1666 * r_P + 2.4968 * r_P ** 2 - 2.1128 * r_P ** 3
+            mu_n = 0.7107 + 0.9963 * r_n - 1.0582 * r_n ** 2 + 0.3124 * r_n ** 3
+
+            energy_j = (Pi * r.delta_t).to('joule').magnitude if Pi.magnitude > 0 else 0.0
+
+            rows.append({
+                'distance_m': r.distance.to('m').magnitude,
+                'time_s': r.time_index.to('s').magnitude,
+                'delta_t_s': r.delta_t.to('s').magnitude,
+                'velocity_ms': v,
+                'velocity_kmh': r.velocity.to('km/h').magnitude,
+                'acceleration_ms2': a,
+                'engine_rpm': ni.to('rpm').magnitude,
+                'Pe_kW': Pe.to('kW').magnitude,
+                'Pi_kW': Pi.to('kW').magnitude,
+                'r_P': r_P,
+                'r_n': r_n,
+                'mu_P': mu_P,
+                'mu_n': mu_n,
+                'efficiency': r.efficiency,
+                'energy_J': energy_j,
+                'fuel_kg': r.fuel_consumed.to('kg').magnitude,
+            })
+
+
+        data_frame = pd.DataFrame(rows)
+
+        data_frame['fuel_cumulative_kg'] = data_frame['fuel_kg'].cumsum()
+        # useful for sanity check on results
+        if output_path is not None:
+            data_frame.to_csv(output_path, index=False)
+            print(f"Saved {len(data_frame)} rows → {output_path}")
+
+        return data_frame
 
 if __name__ == "__main__":
     from pint import UnitRegistry
