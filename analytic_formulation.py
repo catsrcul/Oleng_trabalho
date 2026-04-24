@@ -1,7 +1,31 @@
+import csv
+import logging
 from dataclasses import dataclass
 from pint import UnitRegistry
-import pandas as pd
 import numpy as np
+
+try:
+    import pandas as pd
+except ImportError:
+    class _FallbackDataFrame:
+        def __init__(self, rows):
+            self._rows = list(rows)
+
+        def to_csv(self, output_path, index=False):
+            fieldnames = list(self._rows[0].keys()) if self._rows else []
+            with open(output_path, 'w', newline='') as csv_file:
+                writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(self._rows)
+
+    class _FallbackPandas:
+        @staticmethod
+        def DataFrame(rows):
+            return _FallbackDataFrame(rows)
+
+    pd = _FallbackPandas()
+
+logger = logging.getLogger(__name__)
 
 # Initialize unit registry for physical consistency
 ureg = UnitRegistry()
@@ -189,23 +213,39 @@ class OlengEquations:
         """
         Run full simulation from acceleration array.
 
-        accelerations: list/array of floats (m/s^2), one per distance step
+        accelerations: list/array of floats (m/s^2) or Pint Quantities, one per distance step
         delta_s: Quantity (m), fixed step size
         xi_ax, xi_n: floats, gear/axle ratios
-        output_path: str, where to save CSV
+        output_path: str or None; if given, results are saved as CSV
 
-        Returns: pandas DataFrame with all computed quantities
+        Returns: pandas DataFrame with all computed quantities.
+            Row 0 is the initial state (distance=0, values from __init__).
+            Rows 1..N correspond to each acceleration step.
         """
         # Reset history to initial state only
         self.history = [self.history[0]]
 
+        ds = delta_s.to('m').magnitude
+
         for a_val in accelerations:
+            # Accept both plain floats and Pint Quantities
+            if isinstance(a_val, ureg.Quantity):
+                a_val = a_val.to('m/s**2').magnitude
+
             prev = self.history[-1]
             v_start = prev.velocity.to('m/s').magnitude
 
             # Derive v_target from kinematics: v_f = sqrt(v_i^2 + 2*a*ds)
-            ds = delta_s.to('m').magnitude
             v_f_sq = v_start ** 2 + 2 * a_val * ds
+
+            # Reject physically impossible segments (stopped at both ends)
+            if ds > 0.0 and np.isclose(v_start, 0.0) and np.isclose(max(v_f_sq, 0.0), 0.0):
+                raise ValueError(
+                    "Invalid segment in run(): positive distance step cannot be "
+                    "covered with both start and end velocity equal to zero. "
+                    "Provide a non-zero initial velocity or acceleration."
+                )
+
             v_f_sq = max(v_f_sq, 0.0)  # guard negative under sqrt
             v_target = Q_(np.sqrt(v_f_sq), 'm/s')
 
@@ -248,7 +288,7 @@ class OlengEquations:
         # useful for sanity check on results
         if output_path is not None:
             data_frame.to_csv(output_path, index=False)
-            print(f"Saved {len(data_frame)} rows → {output_path}")
+            logger.debug("Saved %d rows → %s", len(data_frame), output_path)
 
         return data_frame
 

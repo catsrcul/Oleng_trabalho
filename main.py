@@ -1,5 +1,4 @@
-from analytic_formulation import OlengEquations
-from analytic_formulation import ureg, Q_
+from analytic_formulation import OlengEquations, Q_
 import numpy as np
 
 # --- Params ---
@@ -36,10 +35,8 @@ v_cruise   = Q_(90.0, 'km/h').to('m/s')
 model = OlengEquations(params, initial_velocity=Q_(90.0, 'km/h').to('m/s'))
 
 # Constant speed → acceleration = 0 everywhere
-n_steps     = 200
-delta_s     = Q_(500.0, 'm')
 accelerations = np.zeros(n_steps)
 
-df = model.run(accelerations, delta_s, xi_ax=3.9, xi_n=1.0, output_path="results.csv")
+df = model.run(accelerations, delta_s, xi_ax=xi_ax, xi_n=xi_n, output_path="results.csv")
 
 print(df[['distance_m', 'velocity_kmh', 'Pi_kW', 'efficiency', 'fuel_cumulative_kg']].tail())
