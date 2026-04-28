@@ -81,7 +81,23 @@ class OlengEquations:
             fuel_consumed=Q_(0.0, 'kg')
         ))
 
-    def step_distance(self, delta_s, v_target, xi_ax, xi_n):
+    @staticmethod
+    def get_xi_n(velocity_ms):
+        v_kmh = velocity_ms.to('km/h').magnitude
+
+        if v_kmh < 20.0:
+            return 3.5  # 1st gear
+        elif v_kmh < 40.0:
+            return 2.1  # 2nd gear
+        elif v_kmh < 60.0:
+            return 1.4  # 3rd gear
+        elif v_kmh < 80.0:
+            return 1.0  # 4th gear
+        else:
+            return 0.8  # 5th gear
+
+
+    def step_distance(self, delta_s, v_target, xi_ax):
         """
         Calculates the transition to the next distance marker.
 
@@ -96,9 +112,14 @@ class OlengEquations:
         # v_avg is used for power calculations and time estimation
         v_avg = (v_start + v_target) / 2
 
+
         # Guard against zero velocity to avoid infinite time
         v_avg_safe = max(v_avg, Q_(1e-3, 'm/s'))
         dt = delta_s / v_avg_safe
+
+        # getting xi_n -- gear ratio
+        xi_n = self.get_xi_n(v_avg_safe)
+
 
         # Constant acceleration derived from distance and velocities: a = (v_f^2 - v_i^2) / (2 * ds)
         # Note: We use .to('m/s') to ensure units cancel out correctly for the magnitude
@@ -209,7 +230,7 @@ class OlengEquations:
 
 
 
-    def run(self, accelerations, delta_s, xi_ax, xi_n, output_path=None):
+    def run(self, accelerations, delta_s, xi_ax, output_path=None):
         """
         Run full simulation from acceleration array.
 
@@ -249,7 +270,7 @@ class OlengEquations:
             v_f_sq = max(v_f_sq, 0.0)  # guard negative under sqrt
             v_target = Q_(np.sqrt(v_f_sq), 'm/s')
 
-            self.step_distance(delta_s, v_target, xi_ax, xi_n)
+            self.step_distance(delta_s, v_target, xi_ax)
 
         # --- Build DataFrame ---
         rows = []
@@ -328,7 +349,7 @@ if __name__ == "__main__":
     model = OlengEquations(params, initial_velocity=v_cruise)
 
     for _ in range(n_steps):
-        model.step_distance(delta_s, v_cruise, xi_ax, xi_n)
+        model.step_distance(delta_s, v_cruise, xi_ax)
 
     # --- Results ---
     total_fuel = sum(r.fuel_consumed.to('kg').magnitude for r in model.history)
