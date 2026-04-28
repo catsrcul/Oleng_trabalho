@@ -1,6 +1,7 @@
 import csv
 import logging
 from dataclasses import dataclass
+from typing import Any, Optional
 from pint import UnitRegistry
 import numpy as np
 
@@ -35,22 +36,22 @@ Q_ = ureg.Quantity
 @dataclass
 class StateRecord:
     """Stores the state of the vehicle at a specific distance marker."""
-    distance: ureg.Quantity  # Fixed step markers (e.g., meters)
-    velocity: ureg.Quantity  # Velocity at this marker (m/s)
-    delta_t: ureg.Quantity  # Time taken to reach this marker from previous (s)
-    time_index: ureg.Quantity  # Cumulative time (s)
-    acceleration: ureg.Quantity  # Constant acceleration in this segment (m/s^2)
-    efficiency: float  # System efficiency in this segment [0-1]
-    power: ureg.Quantity  # Required power Pi in this segment (kW), evaluated at v_avg
-    fuel_consumed: ureg.Quantity  # Fuel consumed in this segment (kg or L)
-    # Intermediates evaluated at v_avg (average segment velocity) for consistent logging
-    v_avg: ureg.Quantity = None  # Average velocity used for all power/efficiency calculations
-    engine_rpm: ureg.Quantity = None  # Engine speed at v_avg
-    Pe: ureg.Quantity = None  # Available engine power at v_avg
-    r_P: float = 0.0  # Power ratio Pi/Pe at v_avg
-    r_n: float = 0.0  # Speed ratio ni/nP at v_avg
-    mu_P: float = 0.0  # Load correction factor at v_avg
-    mu_n: float = 0.0  # Speed correction factor at v_avg
+    distance: Any  # Quantity in meters
+    velocity: Any  # Quantity in m/s
+    delta_t: Any  # Quantity in seconds
+    time_index: Any  # Quantity in seconds (cumulative)
+    acceleration: Any  # Quantity in m/s^2
+    efficiency: float  # System efficiency [0-1]
+    power: Any  # Quantity in kW
+    fuel_consumed: Any  # Quantity in kg
+    # Intermediates evaluated at v_avg (average segment velocity)
+    v_avg: Optional[Any] = None  # Quantity in m/s
+    engine_rpm: Optional[Any] = None  # Quantity in rpm
+    Pe: Optional[Any] = None  # Quantity in kW (available power)
+    r_P: float = 0.0  # Power ratio Pi/Pe
+    r_n: float = 0.0  # Speed ratio ni/nP
+    mu_P: float = 0.0  # Load correction factor
+    mu_n: float = 0.0  # Speed correction factor
 
 
 class OlengEquations:
@@ -58,16 +59,32 @@ class OlengEquations:
         """
         Initializes the vehicle model with parameters and starting state.
 
-        params: dictionary containing Quantities for:
-            rd (m), nP (rpm), a, b, c (dim), PP (kW), mv (kg), g (m/s^2),
-            fr (dim), rho_a (kg/m^3), CD (dim), Af (m^2), gamma_m (dim),
-            eta_T (dim), eta_o (dim), HL (J/kg or J/L)
+        params: dictionary containing parameters:
+            - rd (Quantity): Wheel radius in meters
+            - nP (Quantity): Rated engine speed in rpm
+            - a, b, c (float): Engine polynomial coefficients (dimensionless)
+            - PP (Quantity): Peak engine power in kW
+            - mv (Quantity): Vehicle mass in kg
+            - g (Quantity): Gravity acceleration in m/s^2
+            - fr (float): Rolling resistance coefficient (dimensionless, plain float for efficiency)
+            - rho_a (Quantity): Air density in kg/m^3
+            - CD (float): Drag coefficient (dimensionless, plain float for efficiency)
+            - Af (Quantity): Frontal area in m^2
+            - gamma_m (float): Rotational inertia correction factor (dimensionless, plain float)
+            - eta_T (float): Drivetrain efficiency (dimensionless, plain float)
+            - eta_o (float): Peak engine efficiency (dimensionless, plain float)
+            - HL (Quantity): Lower heating value in J/kg
+
+        initial_velocity: Starting velocity (float in m/s or Quantity)
         """
         self.p = params
         self.history = []
 
-        # Ensure initial velocity is a Quantity
-        v0 = initial_velocity if isinstance(initial_velocity, ureg.Quantity) else Q_(initial_velocity, 'm/s')
+        # Ensure initial velocity is a Quantity (use duck typing to avoid isinstance issues with Quantity)
+        try:
+            v0 = initial_velocity.to('m/s') if hasattr(initial_velocity, 'to') else Q_(initial_velocity, 'm/s')
+        except (AttributeError, TypeError):
+            v0 = Q_(initial_velocity, 'm/s')
 
         # Initial State (Marker 0)
         self.history.append(StateRecord(
@@ -249,8 +266,8 @@ class OlengEquations:
         ds = delta_s.to('m').magnitude
 
         for a_val in accelerations:
-            # Accept both plain floats and Pint Quantities
-            if isinstance(a_val, ureg.Quantity):
+            # Accept both plain floats and Pint Quantities (use duck typing)
+            if hasattr(a_val, 'to'):
                 a_val = a_val.to('m/s**2').magnitude
 
             prev = self.history[-1]
@@ -319,21 +336,21 @@ if __name__ == "__main__":
     # --- Vehicle Parameters (typical passenger car) ---
     params = {
         'rd':      Q_(0.316, 'm'),           # Wheel radius
-        'nP':      Q_(4000, 'rpm'),           # Rated engine speed
-        'a':       1.2,                       # Engine polynomial coeff a
-        'b':       1.0,                       # Engine polynomial coeff b
-        'c':       0.5,                       # Engine polynomial coeff c
-        'PP':      Q_(100.0, 'kW'),           # Peak engine power
-        'mv':      Q_(1500.0, 'kg'),          # Vehicle mass
-        'g':       Q_(9.81, 'm/s**2'),
-        'fr':      Q_(0.015, 'dimensionless'),# Rolling resistance
-        'rho_a':   Q_(1.225, 'kg/m**3'),     # Air density
-        'CD':      Q_(0.30, 'dimensionless'), # Drag coefficient
-        'Af':      Q_(2.2, 'm**2'),           # Frontal area
-        'gamma_m': Q_(1.05, 'dimensionless'),# Rotational inertia factor
-        'eta_T':   Q_(0.92, 'dimensionless'),# Drivetrain efficiency
-        'eta_o':   Q_(0.38, 'dimensionless'),# Peak engine efficiency
-        'HL':      Q_(44e6, 'J/kg'),         # Lower heating value (gasoline)
+        'nP':      Q_(4000, 'rpm'),          # Rated engine speed
+        'a':       1.2,                      # Engine polynomial coeff a
+        'b':       1.0,                      # Engine polynomial coeff b
+        'c':       0.5,                      # Engine polynomial coeff c
+        'PP':      Q_(100.0, 'kW'),          # Peak engine power
+        'mv':      Q_(1500.0, 'kg'),         # Vehicle mass
+        'g':       Q_(9.81, 'm/s**2'),       # Gravity
+        'fr':      0.015,                    # Rolling resistance (plain float)
+        'rho_a':   Q_(1.225, 'kg/m**3'),    # Air density
+        'CD':      0.30,                     # Drag coefficient (plain float)
+        'Af':      Q_(2.2, 'm**2'),          # Frontal area
+        'gamma_m': 1.05,                     # Rotational inertia factor (plain float)
+        'eta_T':   0.92,                     # Drivetrain efficiency (plain float)
+        'eta_o':   0.38,                     # Peak engine efficiency (plain float)
+        'HL':      Q_(44e6, 'J/kg'),        # Lower heating value (gasoline)
     }
 
     # Gear/axle ratios (fix these to a single gear for now)
