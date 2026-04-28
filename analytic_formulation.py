@@ -1,6 +1,31 @@
-import numpy as np
+import csv
+import logging
 from dataclasses import dataclass
 from pint import UnitRegistry
+import numpy as np
+
+try:
+    import pandas as pd
+except ImportError:
+    class _FallbackDataFrame:
+        def __init__(self, rows):
+            self._rows = list(rows)
+
+        def to_csv(self, output_path, index=False):
+            fieldnames = list(self._rows[0].keys()) if self._rows else []
+            with open(output_path, 'w', newline='') as csv_file:
+                writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(self._rows)
+
+    class _FallbackPandas:
+        @staticmethod
+        def DataFrame(rows):
+            return _FallbackDataFrame(rows)
+
+    pd = _FallbackPandas()
+
+logger = logging.getLogger(__name__)
 
 # Initialize unit registry for physical consistency
 ureg = UnitRegistry()
@@ -16,8 +41,16 @@ class StateRecord:
     time_index: ureg.Quantity  # Cumulative time (s)
     acceleration: ureg.Quantity  # Constant acceleration in this segment (m/s^2)
     efficiency: float  # System efficiency in this segment [0-1]
-    power: ureg.Quantity  # Average power in this segment (kW)
+    power: ureg.Quantity  # Required power Pi in this segment (kW), evaluated at v_avg
     fuel_consumed: ureg.Quantity  # Fuel consumed in this segment (kg or L)
+    # Intermediates evaluated at v_avg (average segment velocity) for consistent logging
+    v_avg: ureg.Quantity = None  # Average velocity used for all power/efficiency calculations
+    engine_rpm: ureg.Quantity = None  # Engine speed at v_avg
+    Pe: ureg.Quantity = None  # Available engine power at v_avg
+    r_P: float = 0.0  # Power ratio Pi/Pe at v_avg
+    r_n: float = 0.0  # Speed ratio ni/nP at v_avg
+    mu_P: float = 0.0  # Load correction factor at v_avg
+    mu_n: float = 0.0  # Speed correction factor at v_avg
 
 
 class OlengEquations:
@@ -73,7 +106,7 @@ class OlengEquations:
 
         # 2. Power and Efficiency (Equations 9-14)
         # We evaluate the vehicle state at the average velocity of the segment
-        eta, Pi = self.calculate_total_efficiency(v_avg, accel, xi_ax, xi_n)
+        eta, Pi, ni, Pe, r_P, r_n, mu_P, mu_n = self.calculate_total_efficiency(v_avg, accel, xi_ax, xi_n)
 
         # 3. Energy and Consumption
         # Energy = Power * Time
@@ -93,7 +126,14 @@ class OlengEquations:
             acceleration=accel,
             efficiency=eta,
             power=Pi.to('kW'),
-            fuel_consumed=instant_fuel
+            fuel_consumed=instant_fuel,
+            v_avg=v_avg,
+            engine_rpm=ni,
+            Pe=Pe,
+            r_P=r_P,
+            r_n=r_n,
+            mu_P=mu_P,
+            mu_n=mu_n,
         )
 
         self.history.append(record)
@@ -102,25 +142,29 @@ class OlengEquations:
     # --- Core Mathematical Formulations ---
 
     """
-    Defined equations: 6,7,9 (efficiency), 10, 11, 12
-    Total number of equations: 11
+    Implemented equations: 6, 7, 9 (efficiency), 10, 11, 12
     """
 
     def calculate_total_efficiency(self, v, a, xi_ax, xi_n):
-        """Equations (6-9) - instantaneous System efficiency lookup"""
+        """Equations (6-9) - instantaneous System efficiency lookup.
+
+        Returns (eta, Pi, ni, Pe, r_P, r_n, mu_P, mu_n) all evaluated at velocity v.
+        """
+        zero_kW = Q_(0.0, 'kW')
+        zero_rpm = Q_(0.0, 'rpm')
         if v < Q_(0.1, 'km/h'):
-            return 0.0, Q_(0.0, 'kW')
+            return 0.0, zero_kW, zero_rpm, zero_kW, 0.0, 0.0, 0.0, 0.0
 
         ni = self.calculate_ni(v, xi_ax, xi_n)
         Pe = self.calculate_Pe(ni)
         Pi = self.calculate_Pi(v, a)
+        r_n = float((ni / self.p['nP']).to('dimensionless').magnitude)
 
         if Pe <= Q_(0, 'kW') or Pi <= Q_(0, 'kW'):
-            return 0.0, Pi
+            return 0.0, Pi, ni, Pe, 0.0, r_n, 0.0, 0.0
 
         # Non-dimensional ratios for the empirical polynomial
-        r_P = (Pi / Pe).to('dimensionless').magnitude
-        r_n = (ni / self.p['nP']).to('dimensionless').magnitude
+        r_P = float((Pi / Pe).to('dimensionless').magnitude)
 
         # Eq 7 - Correction factor for load (mu_P)
         mu_P = 0.5968 - 0.1666 * r_P + 2.4968 * (r_P ** 2) - 2.1128 * (r_P ** 3)
@@ -131,7 +175,7 @@ class OlengEquations:
         # Eq 6 - Final combined efficiency
         # where eta_o is the peak efficiency of the engine
         eta = self.p['eta_o'] * mu_P * mu_n
-        return max(float(eta), 0.0), Pi
+        return max(float(eta), 0.0), Pi, ni, Pe, r_P, r_n, float(mu_P), float(mu_n)
 
     def calculate_Pe(self, ni):
         """Equation (10) - Available engine power"""
@@ -157,12 +201,96 @@ class OlengEquations:
         rolling_res = self.p['mv'] * self.p['g'] * float(self.p['fr']) * v_ms
         aero_res = 0.5 * self.p['rho_a'] * self.p['CD'] * self.p['Af'] * (v_ms ** 3)
 
-        # The inertial part in the paper is wrong, we need to convert the [N] we end up with to th kW we want by
-        # multiplying by the velocity.
+        # The inertial term in the paper yields force [N]; multiply by velocity to convert it to power.
         inertial_res = self.p['mv'] * self.p['gamma_m'] * a_ms2 * v_ms
 
         total_power = (1 / self.p['eta_T']) * (rolling_res + aero_res + inertial_res)
         return total_power.to('kW')
+
+
+
+    def run(self, accelerations, delta_s, xi_ax, xi_n, output_path=None):
+        """
+        Run full simulation from acceleration array.
+
+        accelerations: list/array of floats (m/s^2) or Pint Quantities, one per distance step
+        delta_s: Quantity (m), fixed step size
+        xi_ax, xi_n: floats, gear/axle ratios
+        output_path: str or None; if given, results are saved as CSV
+
+        Returns: pandas DataFrame with all computed quantities.
+            Row 0 is the initial state (distance=0, values from __init__).
+            Rows 1..N correspond to each acceleration step.
+        """
+        # Reset history to initial state only
+        self.history = [self.history[0]]
+
+        ds = delta_s.to('m').magnitude
+
+        for a_val in accelerations:
+            # Accept both plain floats and Pint Quantities
+            if isinstance(a_val, ureg.Quantity):
+                a_val = a_val.to('m/s**2').magnitude
+
+            prev = self.history[-1]
+            v_start = prev.velocity.to('m/s').magnitude
+
+            # Derive v_target from kinematics: v_f = sqrt(v_i^2 + 2*a*ds)
+            v_f_sq = v_start ** 2 + 2 * a_val * ds
+
+            # Reject physically impossible segments (stopped at both ends)
+            if ds > 0.0 and np.isclose(v_start, 0.0) and np.isclose(max(v_f_sq, 0.0), 0.0):
+                raise ValueError(
+                    "Invalid segment in run(): positive distance step cannot be "
+                    "covered with both start and end velocity equal to zero. "
+                    "Provide a non-zero initial velocity or acceleration."
+                )
+
+            v_f_sq = max(v_f_sq, 0.0)  # guard negative under sqrt
+            v_target = Q_(np.sqrt(v_f_sq), 'm/s')
+
+            self.step_distance(delta_s, v_target, xi_ax, xi_n)
+
+        # --- Build DataFrame ---
+        rows = []
+        for r in self.history:
+            # Use stored intermediates — all evaluated at v_avg — for consistent logging
+            v_avg_ms = r.v_avg.to('m/s').magnitude if r.v_avg is not None else 0.0
+            ni_rpm = r.engine_rpm.to('rpm').magnitude if r.engine_rpm is not None else 0.0
+            Pe_kW = r.Pe.to('kW').magnitude if r.Pe is not None else 0.0
+            Pi_kW = r.power.to('kW').magnitude
+            energy_j = (r.power * r.delta_t).to('joule').magnitude if r.power.magnitude > 0 else 0.0
+
+            rows.append({
+                'distance_m': r.distance.to('m').magnitude,
+                'time_s': r.time_index.to('s').magnitude,
+                'delta_t_s': r.delta_t.to('s').magnitude,
+                'velocity_ms': r.velocity.to('m/s').magnitude,
+                'velocity_kmh': r.velocity.to('km/h').magnitude,
+                'v_avg_ms': v_avg_ms,
+                'acceleration_ms2': r.acceleration.to('m/s**2').magnitude,
+                'engine_rpm': ni_rpm,
+                'Pe_kW': Pe_kW,
+                'Pi_kW': Pi_kW,
+                'r_P': r.r_P,
+                'r_n': r.r_n,
+                'mu_P': r.mu_P,
+                'mu_n': r.mu_n,
+                'efficiency': r.efficiency,
+                'energy_J': energy_j,
+                'fuel_kg': r.fuel_consumed.to('kg').magnitude,
+            })
+
+
+        data_frame = pd.DataFrame(rows)
+
+        data_frame['fuel_cumulative_kg'] = data_frame['fuel_kg'].cumsum()
+        # useful for sanity check on results
+        if output_path is not None:
+            data_frame.to_csv(output_path, index=False)
+            logger.debug("Saved %d rows → %s", len(data_frame), output_path)
+
+        return data_frame
 
 if __name__ == "__main__":
     # Reuse the module-level unit registry/quantity constructor.
