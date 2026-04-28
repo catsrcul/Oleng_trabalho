@@ -9,6 +9,10 @@ results.csv
 .ipynb_checkpoints
 */.ipynb_checkpoints/*
 
+.virtual_documents/
+.env
+*.log
+
 # Generated output files
 results.csv
 
