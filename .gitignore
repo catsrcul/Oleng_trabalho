@@ -1,4 +1,6 @@
 # ---- added by me
+.idea/
+
 # Python
 __pycache__/
 *.py[cod]
