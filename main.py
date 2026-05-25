@@ -29,10 +29,10 @@ import numpy as np
 
 # --- Optimization Setup ---
 delta_s    = Q_(500.0, 'm')
-total_dist = Q_(30_000.0, 'm')
+total_dist = Q_(10_000.0, 'm')
 n_steps    = int(total_dist / delta_s)
 
-v_cruise = Q_(20, 'km/h').to('m/s')
+v_cruise = Q_(50, 'km/h').to('m/s')
 v_max = Q_(120, 'km/h').to('m/s')
 v_min = Q_(50, 'km/h').to('m/s')  # Added min speed
 n_min = 1000.0                    # Added min RPM
