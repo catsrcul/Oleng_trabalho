@@ -33,7 +33,11 @@ n_steps    = int(total_dist / delta_s)
 
 v_cruise = Q_(90, 'km/h').to('m/s')
 v_max = Q_(120, 'km/h').to('m/s')
-a_max = 4.0  # m/s²
+v_min = Q_(50, 'km/h').to('m/s')  # Added min speed
+n_min = 1000.0                    # Added min RPM
+n_max = 6000.0                    # Added max RPM
+a_max = 4.0                       # m/s²
+
 
 def make_model():
     """Create a fresh model for each evaluation to ensure consistency."""
@@ -53,32 +57,61 @@ def fuel_objective(acceleration_profile):
         return fuel
     except (ValueError, RuntimeError):
         # If simulation fails, return large penalty
-        return 1e10
+        return 1e10 + np.sum(acceleration_profile**2)
 
-def speed_constraint(acceleration_profile):
-    """Constraint: velocity must not exceed v_max at any segment.
-    Returns v_max - velocity at each step (must be >= 0).
-    Includes error handling for infeasible profiles.
-    """
+
+def combined_constraints(acceleration_profile):
+    """Eval velocities, RPMs, and power surplus to satisfy 3 missing equations."""
     try:
         model = make_model()
         results = model.run(acceleration_profile, delta_s, xi_ax=3.9)
-        # Skip row 0 (initial state) and check all subsequent velocities
+
+        # Skip row 0 (initial state)
         speeds = results['velocity_ms'].iloc[1:].to_numpy()
-        return v_max.to('m/s').magnitude - speeds
+        rpms = results['engine_rpm'].iloc[1:].to_numpy()
+        p_req = results['Pi_kW'].iloc[1:].to_numpy()
+        p_avail = results['Pe_kW'].iloc[1:].to_numpy()
+
+        # Eq: Pi - Pe <= 0 is same as Pe - Pi >= 0
+        power_margin = p_avail - p_req
+
+        # Concat arrays for single SciPy constraint evaluation
+        return np.concatenate([speeds, rpms, power_margin])
+
     except (ValueError, RuntimeError):
-        # If simulation fails, return zeros (will violate constraint)
-        return np.zeros(len(acceleration_profile))
+        # Return failing bounds if simulation crashes
+        n = len(acceleration_profile)
+        return np.concatenate([
+            np.zeros(n),  # Fails v_min
+            np.zeros(n),  # Fails n_min
+            np.full(n, -1.0)  # Fails power >= 0
+        ])
+
 
 # Bounds on acceleration: -4 to +4 m/s² (allows braking)
 bounds = Bounds([-a_max] * n_steps, [a_max] * n_steps)
 
-# Nonlinear constraint: speed <= v_max everywhere
+# Nonlinear constraint: speed <= v_max everywhere, RPM limits, and power surplus >= 0
+# Build lb/ub arrays for combined constraint
+# Order: [speeds, rpms, power_margins]
+lb = np.concatenate([
+    np.full(n_steps, v_min.magnitude),  # v_i >= v_min
+    np.full(n_steps, n_min),            # n_i >= n_min
+    np.zeros(n_steps)                   # Pe - Pi >= 0
+])
+
+ub = np.concatenate([
+    np.full(n_steps, v_max.magnitude),  # v_i <= v_max
+    np.full(n_steps, n_max),            # n_i <= n_max
+    np.full(n_steps, np.inf)            # No max limit on available power surplus
+])
+
 constraints = [
-    NonlinearConstraint(speed_constraint, 0.0, np.inf)
+    NonlinearConstraint(combined_constraints, lb, ub)
 ]
 
-initial_guess = np.zeros(n_steps)
+initial_guess = np.zeros(n_steps)  # Start with zero acceleration (constant speed) as initial guess
+
 
 # Run optimization
 print("Starting optimization...")
