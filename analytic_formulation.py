@@ -225,7 +225,7 @@ class OlengEquations:
 
     def calculate_ni(self, v, xi_ax, xi_n):
         """Equation (11) - Rotational speed calculation"""
-        v_kmh = v.to('km/h').magnitude
+        v_kmh = v.to('m/s').magnitude
         ni_mag = (9.55 * v_kmh * xi_ax * xi_n) / self.p['rd'].to('m').magnitude
         return Q_(ni_mag, 'rpm')
 

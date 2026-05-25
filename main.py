@@ -1,24 +1,25 @@
-
 from analytic_formulation import Q_
 
+
 # --- Params ---
+# for a toyota yaris
 params = {
-    'rd':      Q_(0.316, 'm'),
-    'nP':      Q_(4000, 'rpm'),
-    'a':       1.2,
+    'rd':      Q_(0.30, 'm'),
+    'nP':      Q_(6000, 'rpm'),
+    'a':       1.0,
     'b':       1.0,
-    'c':       0.5,
-    'PP':      Q_(100.0, 'kW'),
-    'mv':      Q_(1500.0, 'kg'),
+    'c':       1.0,
+    'PP':      Q_(73.1, 'kW'),
+    'mv':      Q_(1005.0, 'kg'),
     'g':       Q_(9.81, 'm/s**2'),
     'fr':      0.015,                    # plain float, avoids pint friction
     'rho_a':   Q_(1.225, 'kg/m**3'),
     'CD':      0.30,                     # plain float
-    'Af':      Q_(2.2, 'm**2'),
-    'gamma_m': 1.05,                     # plain float
+    'Af':      Q_(1.80, 'm**2'),
+    'gamma_m': 1.08,                     # plain float
     'eta_T':   0.92,                     # plain float
     'eta_o':   0.38,
-    'HL':      Q_(44e6, 'J/kg'),
+    'HL':      Q_(43.4e6, 'J/kg'),
 }
 
 
@@ -28,10 +29,10 @@ import numpy as np
 
 # --- Optimization Setup ---
 delta_s    = Q_(500.0, 'm')
-total_dist = Q_(10_000.0, 'm')
+total_dist = Q_(30_000.0, 'm')
 n_steps    = int(total_dist / delta_s)
 
-v_cruise = Q_(90, 'km/h').to('m/s')
+v_cruise = Q_(20, 'km/h').to('m/s')
 v_max = Q_(120, 'km/h').to('m/s')
 v_min = Q_(50, 'km/h').to('m/s')  # Added min speed
 n_min = 1000.0                    # Added min RPM
