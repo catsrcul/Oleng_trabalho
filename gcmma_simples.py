@@ -228,23 +228,26 @@ class Otimizador:
         passo = np.linalg.norm(x_novo - x_k)
         return x_novo, passo, lambda_val
 
-
     def graficar(self):
         """Plota histórico de convergência."""
         fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-        
-        axes[0].plot(self.historico['f'], 'b-o')
+
+        # Convert penalty to NaN. Matplotlib skips NaN.
+        f_vals = np.array(self.historico['f'])
+        f_vals[f_vals >= 1e9] = np.nan
+
+        axes[0].plot(f_vals, 'b-o')
         axes[0].set_xlabel('Iteração')
         axes[0].set_ylabel('f(x)')
         axes[0].set_title('Função Objetivo')
         axes[0].grid(True, alpha=0.3)
-        
+
         axes[1].semilogy(self.historico['violacao'], 'r-o')
         axes[1].set_xlabel('Iteração')
         axes[1].set_ylabel('Violação')
         axes[1].set_title('Violação de Restrição')
         axes[1].grid(True, alpha=0.3)
-        
+
         plt.tight_layout()
         return fig
     
